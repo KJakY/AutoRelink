@@ -1,0 +1,17 @@
+{
+  "monitor_index": 1,
+  "poll_interval": 0.4,
+  "post_key_delay": 0.8,
+  "post_click_delay": 1.2,
+  "match_threshold": 0.87,
+  "next_button_template": "templates/next_button.png",
+  "retry_unselected_template": "templates/retry_unselected.png",
+  "confirm_yes_template": "templates/confirm_yes.png",
+  "pause_hotkey": "f8",
+  "stop_hotkey": "f10",
+  "capture_hotkey": "f9",
+  "game_window_title": "GRANBLUE FANTASY",
+  "confirm_key": "enter",
+  "select_up_key": "w",
+  "continue_confirm_template": "templates/continue_confirm.png"
+}
