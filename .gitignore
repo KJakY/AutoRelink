@@ -3,3 +3,4 @@ __pycache__/
 build/
 dist/
 png/
+autorelink_error.log

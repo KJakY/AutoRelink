@@ -14,6 +14,7 @@ import shutil
 import sys
 import threading
 import time
+import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -48,6 +49,32 @@ def _get_bundle_dir(base_dir):
 
 BASE_DIR = _get_base_dir()
 BUNDLE_DIR = _get_bundle_dir(BASE_DIR)
+ERROR_LOG_PATH = os.path.join(BASE_DIR, "autorelink_error.log")
+
+
+def _setup_frozen_stdio():
+    """--windowed (noconsole) でビルドした exe は sys.stdout/sys.stderr が None になり、
+    ライブラリ内の print やトレースバック出力がそこに書き込もうとして
+    AttributeError で異常終了することがある。ファイルにリダイレクトして防ぐ。"""
+    if not getattr(sys, "frozen", False):
+        return
+    if sys.stdout is None or sys.stderr is None:
+        log_file = open(ERROR_LOG_PATH, "a", encoding="utf-8", buffering=1)
+        sys.stdout = log_file
+        sys.stderr = log_file
+
+
+def log_exception_to_file(context, exc_type, exc_value, exc_tb):
+    text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    try:
+        with open(ERROR_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} [{context}] ---\n{text}\n")
+    except Exception:
+        pass
+    return text
+
+
+_setup_frozen_stdio()
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
@@ -400,26 +427,51 @@ class AutoRelinkApp:
             self.root.after(0, self._calibration_finished, tdef, None)
             return
 
-        cap = ScreenCapture(self.cfg.get("monitor_index", 1))
-        frame = cap.grab_bgr()
+        try:
+            cap = ScreenCapture(self.cfg.get("monitor_index", 1))
+            frame = cap.grab_bgr()
+        except Exception:
+            text = log_exception_to_file("calibration:capture", *sys.exc_info())
+            self.root.after(0, self._calibration_capture_failed, tdef, text)
+            return
+
         self.root.after(0, self._show_roi_selector, tdef, frame)
 
+    def _calibration_capture_failed(self, tdef, error_text):
+        self.log(f"[エラー] {tdef['label']} のスクリーンショット取得に失敗しました。詳細: {ERROR_LOG_PATH}")
+        messagebox.showerror(
+            "AutoRelink - エラー",
+            f"スクリーンショットの取得に失敗しました。\nモニタ番号の設定を確認してください。\n\n{error_text[-800:]}",
+        )
+        self._calibration_finished(tdef, None)
+
     def _show_roi_selector(self, tdef, frame):
-        self.calib_status_var.set(f"[{tdef['label']}] 範囲をドラッグして選択し、Enterで確定（Cでキャンセル）してください。")
-        window_name = f"Select ROI: {tdef['key']}"
-        roi = cv2.selectROI(window_name, frame, showCrosshair=True, fromCenter=False)
-        cv2.destroyWindow(window_name)
-        x, y, w, h = roi
-        if w > 0 and h > 0:
-            crop = frame[y : y + h, x : x + w]
-            saved_path = os.path.join(TEMPLATES_DIR, f"{tdef['key']}.png")
-            cv2.imwrite(saved_path, crop)
-            rel_path = os.path.relpath(saved_path, BASE_DIR).replace("\\", "/")
-            self.cfg[tdef["config_key"]] = rel_path
-            save_config(self.cfg)
-            self.log(f"[テンプレート作成] {tdef['label']} -> {saved_path} ({w}x{h})")
-        else:
-            self.log(f"[テンプレート作成] {tdef['label']} はキャンセルされました。")
+        try:
+            self.calib_status_var.set(
+                f"[{tdef['label']}] 範囲をドラッグして選択し、Enterで確定（Cでキャンセル）してください。"
+            )
+            window_name = f"Select ROI: {tdef['key']}"
+            roi = cv2.selectROI(window_name, frame, showCrosshair=True, fromCenter=False)
+            cv2.destroyWindow(window_name)
+            x, y, w, h = roi
+            if w > 0 and h > 0:
+                crop = frame[y : y + h, x : x + w]
+                saved_path = os.path.join(TEMPLATES_DIR, f"{tdef['key']}.png")
+                cv2.imwrite(saved_path, crop)
+                rel_path = os.path.relpath(saved_path, BASE_DIR).replace("\\", "/")
+                self.cfg[tdef["config_key"]] = rel_path
+                save_config(self.cfg)
+                self.log(f"[テンプレート作成] {tdef['label']} -> {saved_path} ({w}x{h})")
+            else:
+                self.log(f"[テンプレート作成] {tdef['label']} はキャンセルされました。")
+                saved_path = None
+        except Exception:
+            text = log_exception_to_file("calibration:roi_selector", *sys.exc_info())
+            self.log(f"[エラー] {tdef['label']} の範囲選択でエラーが発生しました。詳細: {ERROR_LOG_PATH}")
+            messagebox.showerror(
+                "AutoRelink - エラー",
+                f"範囲選択ウィンドウの表示中にエラーが発生しました。\n\n{text[-800:]}",
+            )
             saved_path = None
         self._calibration_finished(tdef, saved_path)
 
@@ -680,8 +732,29 @@ class AutoRelinkApp:
         self.root.destroy()
 
 
+def _thread_excepthook(args):
+    text = log_exception_to_file(
+        f"thread:{args.thread.name}", args.exc_type, args.exc_value, args.exc_traceback
+    )
+    print(text)
+
+
+def _tk_report_callback_exception(exc_type, exc_value, exc_tb):
+    text = log_exception_to_file("tkinter-callback", exc_type, exc_value, exc_tb)
+    print(text)
+    try:
+        messagebox.showerror(
+            "AutoRelink - エラー",
+            f"予期しないエラーが発生しました。詳細は以下に記録しました:\n{ERROR_LOG_PATH}\n\n{text[-800:]}",
+        )
+    except Exception:
+        pass
+
+
 def main():
+    threading.excepthook = _thread_excepthook
     root = tk.Tk()
+    root.report_callback_exception = _tk_report_callback_exception
     AutoRelinkApp(root)
     root.mainloop()
 
